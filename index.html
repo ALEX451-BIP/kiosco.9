@@ -10483,7 +10483,10 @@ function refreshCurrentTab() {
         // Debe ejecutarse en cada sitio que muta el estado de caja antes de saveAll().
         function _tocarCaja(obj) {
             if (!obj) return;
-            obj._updatedAt = Date.now();
+            // Reloj lógico (Lamport): la operación LOCAL siempre supera el último
+            // estado remoto visto, sin depender del reloj de pared (evita que un
+            // escaneo/eco de otro equipo con hora adelantada "pise" la apertura).
+            obj._updatedAt = Math.max(_tsMs(obj._updatedAt) || 0, Date.now()) + 1;
             obj._version = Date.now() + Math.random();
             obj._deviceId = window._deviceId;
             obj._operationId = _nuevaOperationId();
@@ -10763,6 +10766,10 @@ function refreshCurrentTab() {
             try {
                 const c = Object.assign({}, obj);
                 delete c._updatedAt; delete c._id; delete c._version;
+                delete c._operationId; delete c._deviceId; delete c._marca;
+                // Los movimientos son documentos individuales (nunca viajan en el
+                // header): excluirlos de la huella evita "re-subidas" infinitas.
+                delete c.movimientos;
                 return _canon(c);
             } catch (e) { return String(obj); }
         }
@@ -10845,7 +10852,7 @@ function refreshCurrentTab() {
         }
         // Identificador de esta versión: se muestra en el badge y viaja por la nube
         // para detectar dispositivos con la página vieja en caché (GitHub Pages).
-        const _BUILD_ID = "B20260810b";
+        const _BUILD_ID = "B20260812a";
         window.__BUILD_ID = _BUILD_ID;
         // ---------------- métricas reales ----------------
         window.syncMetrics = { lastWriteLatency: null, lastWriteAt: null, lastSnapshotAt: null, lastSnapshotLatency: null, pendingOperations: 0, lastSync: null, errors: [] };
@@ -11104,6 +11111,9 @@ function refreshCurrentTab() {
         function _scanSingletonHeader(kind) {
             const obj = kind === 'caja' ? window.caja : window.cigCaja;
             if (!obj) return;
+            // Guard de arranque: no subir el estado local hasta recibir el primer
+            // snapshot remoto (evita que un boot con caché vieja pise la nube).
+            if (!_booted[kind] && navigator.onLine !== false && (Date.now() - _bootTime) < 8000) return;
             if (!obj._deviceId) obj._deviceId = window._deviceId;
             const header = {};
             for (const k in obj) {
@@ -11118,7 +11128,9 @@ function refreshCurrentTab() {
             const col = kind === 'caja' ? 'caja' : 'cigCaja';
             const doc = Object.assign({}, header);
             doc._id = 'principal';
-            doc._updatedAt = Date.now();
+            // Eco: preservar el timestamp lógico actual (un re-escaneo o eco tras
+            // adoptar datos remotos NO debe inflar el timestamp ni ganar por reloj).
+            doc._updatedAt = _tsMs(obj._updatedAt) || Date.now();
             doc._version = (obj._version || 0) + 1;
             obj._version = doc._version;
             doc._deviceId = window._deviceId;
@@ -11272,9 +11284,17 @@ function refreshCurrentTab() {
             const fb = _normalizeRemote(data);
             const localTs = _tsMs(cj._updatedAt);
             const remoteTs = _tsMs(fb._updatedAt);
-            if (localTs >= remoteTs) {
-                if (_fpStatic(cj) !== _fpStatic(fb)) { const c = _fpCache['~caja/principal']; if (c) delete c._; _scheduleFlush(0); }
+            const localFp = _fpStatic(cj);
+            const remoteFp = _fpStatic(fb);
+            if (localTs > remoteTs) {
+                if (localFp !== remoteFp) { const c = _fpCache['~caja/principal']; if (c) delete c._; _dirtyEntities['caja'] = true; _scheduleFlush(0); }
                 return false;
+            }
+            if (localTs === remoteTs) {
+                if (localFp === remoteFp) return false;
+                // Empate lógico (reloj Lamport): gana determinísticamente el
+                // operationId mayor; el perdedor adopta y deja de re-escribir.
+                if ((fb._operationId || '') <= (cj._operationId || '')) { const c = _fpCache['~caja/principal']; if (c) delete c._; _dirtyEntities['caja'] = true; _scheduleFlush(0); return false; }
             }
             // SOLO cabecera: apertura, montos, cerradaEn, cierres (los movimientos vienen aparte)
             const headerKeys = ['apertura', 'montoApertura', 'montoAperturaEfectivo', 'montoAperturaTransferencia', 'cerradaEn', 'cierres'];
@@ -11304,9 +11324,17 @@ function refreshCurrentTab() {
             const fb = _normalizeRemote(data);
             const localTs = _tsMs(cc._updatedAt);
             const remoteTs = _tsMs(fb._updatedAt);
-            if (localTs >= remoteTs) {
-                if (_fpStatic(cc) !== _fpStatic(fb)) { const c = _fpCache['~cigCaja/principal']; if (c) delete c._; _scheduleFlush(0); }
+            const localFp = _fpStatic(cc);
+            const remoteFp = _fpStatic(fb);
+            if (localTs > remoteTs) {
+                if (localFp !== remoteFp) { const c = _fpCache['~cigCaja/principal']; if (c) delete c._; _dirtyEntities['cigCaja'] = true; _scheduleFlush(0); }
                 return false;
+            }
+            if (localTs === remoteTs) {
+                if (localFp === remoteFp) return false;
+                // Empate lógico (reloj Lamport): gana determinísticamente el
+                // operationId mayor; el perdedor adopta y deja de re-escribir.
+                if ((fb._operationId || '') <= (cc._operationId || '')) { const c = _fpCache['~cigCaja/principal']; if (c) delete c._; _dirtyEntities['cigCaja'] = true; _scheduleFlush(0); return false; }
             }
             const headerKeys = ['apertura', 'montoApertura', 'montoAperturaEfectivo', 'montoAperturaTransferencia', 'cerradaEn', 'cierres', 'transferenciasACajaGeneral'];
             for (const k of headerKeys) if (k in fb) cc[k] = fb[k];
@@ -11335,6 +11363,10 @@ function refreshCurrentTab() {
             if (!obj) return 0;
             let g = 0;
             for (const c of (obj.cierres || [])) { const t = _tsMs(c && c.fecha); if (t > g) g = t; }
+            // Una apertura adoptada de otro equipo inicia una sesión nueva:
+            // movimientos anteriores a esa apertura (tolerancia anti-reloj) quedan
+            // archivados, igual que en el cierre local.
+            if (obj.apertura) { const ta = _tsMs(obj.apertura) - 60000; if (ta > g) g = ta; }
             return g;
         }
         function _applyMovimientoRemote(col, doc, isAdd) {
@@ -11471,9 +11503,11 @@ function refreshCurrentTab() {
             });
             // singletons
             onSnapshot(doc(db, 'caja', 'principal'), function(snap) {
+                _booted['caja'] = true;
                 if (snap.exists()) { const r = _applyCajaRemote(snap.data()); if (r) _scheduleRender('caja'); }
             }, function(err) { _logFirebaseError(err, 'caja', 'listener'); });
             onSnapshot(doc(db, 'cigCaja', 'principal'), function(snap) {
+                _booted['cigCaja'] = true;
                 if (snap.exists()) { const r = _applyCigCajaRemote(snap.data()); if (r) _scheduleRender('cigCaja'); }
             }, function(err) { _logFirebaseError(err, 'cigCaja', 'listener'); });
             onSnapshot(doc(db, 'configuracion', 'general'), function(snap) {
