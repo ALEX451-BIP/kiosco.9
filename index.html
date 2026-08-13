@@ -10767,9 +10767,10 @@ function refreshCurrentTab() {
                 const c = Object.assign({}, obj);
                 delete c._updatedAt; delete c._id; delete c._version;
                 delete c._operationId; delete c._deviceId; delete c._marca;
-                // Los movimientos son documentos individuales (nunca viajan en el
-                // header): excluirlos de la huella evita "re-subidas" infinitas.
-                delete c.movimientos;
+                // Los movimientos son documentos individuales y efectivo/transferencia
+                // son derivados de ellos: ninguno viaja en el header. Excluirlos de la
+                // huella evita "re-subidas" infinitas entre dispositivos.
+                delete c.movimientos; delete c.efectivo; delete c.transferencia;
                 return _canon(c);
             } catch (e) { return String(obj); }
         }
@@ -10852,7 +10853,7 @@ function refreshCurrentTab() {
         }
         // Identificador de esta versión: se muestra en el badge y viaja por la nube
         // para detectar dispositivos con la página vieja en caché (GitHub Pages).
-        const _BUILD_ID = "B20260812a";
+        const _BUILD_ID = "B20260812b";
         window.__BUILD_ID = _BUILD_ID;
         // ---------------- métricas reales ----------------
         window.syncMetrics = { lastWriteLatency: null, lastWriteAt: null, lastSnapshotAt: null, lastSnapshotLatency: null, pendingOperations: 0, lastSync: null, errors: [] };
